@@ -147,11 +147,16 @@ if user_input:
         st.write(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                response = agent_executor.invoke({"input": user_input})["output"]
-            except Exception as e:
-                response = f"Sorry, failed: {e}"
-        st.write(response)
+       with st.spinner("Thinking..."):
+    try:
+        result = agent_executor.invoke({"input": user_input})
+        response = result["output"]
+    except Exception as e:
+        response = f"Sorry, failed: {e}"
+    st.write(response)
+
+    # Debug: weather tool ko directly test karo
+    with st.expander("🔧 Debug: Weather tool direct test"):
+        st.write(get_weather("Goa"))
 
     st.session_state.messages.append({"role": "assistant", "content": response})
