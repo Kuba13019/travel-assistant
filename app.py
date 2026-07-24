@@ -120,6 +120,9 @@ agent = initialize_agent(
     agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True,
     handle_parsing_errors=True,
+    max_iterations=8,
+    max_execution_time=60,
+    early_stopping_method="generate",
 )
 
 # ---------- Chat UI ----------
