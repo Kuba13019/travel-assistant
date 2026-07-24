@@ -1,3 +1,6 @@
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
+
 import os
 import streamlit as st
 import requests
@@ -8,7 +11,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
-from langchain.agents import Tool, initialize_agent, AgentType
+from langchain.agents import Tool
 from langchain_community.tools import DuckDuckGoSearchRun
 
 st.set_page_config(page_title="AI Travel Assistant", page_icon="✈️")
@@ -114,15 +117,19 @@ if st.session_state.vectorstore is not None:
         )
     )
 
-agent = initialize_agent(
+agent_prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful travel assistant. Use the available tools to answer the user's travel-related questions accurately and concisely."),
+    ("human", "{input}"),
+    ("placeholder", "{agent_scratchpad}"),
+])
+
+agent = create_tool_calling_agent(llm, tools, agent_prompt)
+agent_executor = AgentExecutor(
+    agent=agent,
     tools=tools,
-    llm=llm,
-    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
     verbose=True,
     handle_parsing_errors=True,
     max_iterations=8,
-    max_execution_time=60,
-    early_stopping_method="generate",
 )
 
 # ---------- Chat UI ----------
@@ -140,9 +147,9 @@ if user_input:
         st.write(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Soch raha hoon..."):
+        with st.spinner("Thinking..."):
             try:
-                response = agent.run(user_input)
+                response = agent_executor.invoke({"input": user_input})["output"]
             except Exception as e:
                 response = f"Sorry, kuch galat ho gaya: {e}"
         st.write(response)
