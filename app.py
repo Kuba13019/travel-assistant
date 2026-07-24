@@ -3,26 +3,35 @@ import streamlit as st
 import requests
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
 from langchain.agents import Tool, initialize_agent, AgentType
 from langchain_community.tools import DuckDuckGoSearchRun
 
 st.set_page_config(page_title="AI Travel Assistant", page_icon="✈️")
 st.title("✈️ AI Travel Assistant")
-st.caption("RAG chatbot + Web Search + Weather API — powered by LangChain")
+st.caption("RAG chatbot + Web Search + Weather API — powered by LangChain + Groq")
 
 # ---------- API keys (Streamlit Cloud secrets, or local env vars) ----------
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", os.environ.get("OPENWEATHER_API_KEY", ""))
 
-if not OPENAI_API_KEY:
-    st.error("OPENAI_API_KEY set nahi hai. Streamlit Cloud app settings -> Secrets me add karo.")
+if not GROQ_API_KEY:
+    st.error("GROQ_API_KEY set nahi hai. Streamlit Cloud app settings -> Secrets me add karo.")
     st.stop()
 
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0, openai_api_key=OPENAI_API_KEY)
+llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
+
+
+@st.cache_resource
+def load_embeddings():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+
+embeddings_model = load_embeddings()
 
 # ---------- Sidebar: document upload (RAG) ----------
 st.sidebar.header("📄 Travel Document Upload")
@@ -46,8 +55,7 @@ if uploaded_file is not None:
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = splitter.split_documents(docs)
 
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-        st.session_state.vectorstore = FAISS.from_documents(chunks, embeddings)
+        st.session_state.vectorstore = FAISS.from_documents(chunks, embeddings_model)
         st.sidebar.success(f"Document processed! ({len(chunks)} chunks)")
     except Exception as e:
         st.sidebar.error(f"Document process karne me error: {e}")
