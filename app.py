@@ -1,6 +1,3 @@
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.prompts import ChatPromptTemplate
-
 import os
 import streamlit as st
 import requests
@@ -8,10 +5,11 @@ import requests
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import FakeEmbeddings
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
-from langchain.agents import Tool
+from langchain.agents import Tool, AgentExecutor, create_tool_calling_agent
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.tools import DuckDuckGoSearchRun
 
 st.set_page_config(page_title="AI Travel Assistant", page_icon="✈️")
@@ -31,7 +29,7 @@ llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_AP
 
 @st.cache_resource
 def load_embeddings():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return FakeEmbeddings(size=768)
 
 
 embeddings_model = load_embeddings()
@@ -117,8 +115,10 @@ if st.session_state.vectorstore is not None:
         )
     )
 
+# ---------- Tool-calling agent (reliable with Groq models) ----------
 agent_prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful travel assistant. Use the available tools to answer the user's travel-related questions accurately and concisely."),
+    ("system", "You are a helpful travel assistant. Use the available tools to answer the "
+               "user's travel-related questions accurately and concisely."),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}"),
 ])
@@ -151,7 +151,7 @@ if user_input:
             try:
                 response = agent_executor.invoke({"input": user_input})["output"]
             except Exception as e:
-                response = f"Sorry, kuch galat ho gaya: {e}"
+                response = f"Sorry, failed: {e}"
         st.write(response)
 
     st.session_state.messages.append({"role": "assistant", "content": response})
