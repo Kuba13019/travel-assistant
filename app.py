@@ -1,24 +1,17 @@
 import os
-import json
-import re
+import sqlite3
+from datetime import datetime
+
 import streamlit as st
-import requests
-
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import FakeEmbeddings
+import arxiv
 from langchain_groq import ChatGroq
-from langchain.chains import RetrievalQA
-from langchain_community.tools import DuckDuckGoSearchRun
 
-st.set_page_config(page_title="AI Travel Assistant", page_icon="✈️")
-st.title("✈️ AI Travel Assistant")
-st.caption("RAG chatbot + Web Search + Weather API — powered by LangChain + Groq")
+st.set_page_config(page_title="AI Research Helper", page_icon="📚")
+st.title("📚 AI Research Helper")
+st.caption("arXiv Search + Summarization + Citations + History — powered by LangChain + Groq")
 
-# ---------- API keys (Streamlit Cloud secrets, or local env vars) ----------
+# ---------- API key ----------
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
-OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", os.environ.get("OPENWEATHER_API_KEY", ""))
 
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY set nahi hai. Streamlit Cloud app settings -> Secrets me add karo.")
@@ -26,178 +19,155 @@ if not GROQ_API_KEY:
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
 
-
-@st.cache_resource
-def load_embeddings():
-    return FakeEmbeddings(size=768)
+# ---------- SQLite setup (search history) ----------
+DB_PATH = "research_helper.db"
 
 
-embeddings_model = load_embeddings()
-
-# ---------- Sidebar: document upload (RAG) ----------
-st.sidebar.header("📄 Travel Document Upload")
-uploaded_file = st.sidebar.file_uploader("PDF ya TXT travel guide upload karo", type=["pdf", "txt"])
-
-if "vectorstore" not in st.session_state:
-    st.session_state.vectorstore = None
-
-if uploaded_file is not None:
-    temp_path = f"temp_{uploaded_file.name}"
-    with open(temp_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    try:
-        if uploaded_file.name.lower().endswith(".pdf"):
-            loader = PyPDFLoader(temp_path)
-        else:
-            loader = TextLoader(temp_path)
-
-        docs = loader.load()
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        chunks = splitter.split_documents(docs)
-
-        st.session_state.vectorstore = FAISS.from_documents(chunks, embeddings_model)
-        st.sidebar.success(f"Document processed! ({len(chunks)} chunks)")
-    except Exception as e:
-        st.sidebar.error(f"Document process karne me error: {e}")
-
-# ---------- Tool functions ----------
-search_tool_runner = DuckDuckGoSearchRun()
+def get_connection():
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 
-def run_web_search(query: str) -> str:
-    try:
-        result = search_tool_runner.run(query)
-        if "No good DuckDuckGo Search Result" in result or not result.strip():
-            simplified = re.sub(
-                r"\b(right now|currently|today|at the moment|these days)\b", "", query, flags=re.IGNORECASE
-            ).strip()
-            if simplified and simplified != query:
-                result = search_tool_runner.run(simplified)
-        return result
-    except Exception as e:
-        return f"Web search error: {e}"
+def init_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS search_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT,
+            timestamp TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 
-def run_weather_lookup(city: str) -> str:
-    if not OPENWEATHER_API_KEY:
-        return "Weather API key configured nahi hai."
-    url = (
-        f"https://api.openweathermap.org/data/2.5/weather"
-        f"?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+def save_search(query: str):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO search_history (query, timestamp) VALUES (?, ?)",
+        (query, datetime.now().isoformat(timespec="seconds")),
     )
+    conn.commit()
+    conn.close()
+
+
+def get_history():
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT query, timestamp FROM search_history ORDER BY id DESC LIMIT 50")
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+init_db()
+
+# ---------- Session state ----------
+if "papers" not in st.session_state:
+    st.session_state.papers = []
+if "citations" not in st.session_state:
+    st.session_state.citations = []
+
+
+# ---------- Helper functions ----------
+def search_arxiv(query: str, max_results: int = 5):
     try:
-        response = requests.get(url, timeout=10)
-        data = response.json()
-        if data.get("cod") != 200:
-            return f"Sorry, '{city}' ka weather nahi mil paya. ({data.get('message', 'unknown error')})"
-        temp = data["main"]["temp"]
-        desc = data["weather"][0]["description"]
-        return f"{city} mein abhi {temp}°C hai, aasman: {desc}"
-    except requests.exceptions.Timeout:
-        return "Weather service timeout ho gaya, thodi der baad try karo."
+        search = arxiv.Search(
+            query=query,
+            max_results=max_results,
+            sort_by=arxiv.SortCriterion.Relevance,
+        )
+        results = []
+        for paper in search.results():
+            results.append({
+                "title": paper.title,
+                "authors": [a.name for a in paper.authors],
+                "summary": paper.summary,
+                "published": str(paper.published.date()),
+                "url": paper.entry_id,
+            })
+        return results
     except Exception as e:
-        return f"Weather fetch error: {e}"
+        st.error(f"arXiv search error: {e}")
+        return []
 
 
-def run_doc_qa(query: str) -> str:
-    if st.session_state.vectorstore is None:
-        return "Koi document upload nahi kiya gaya hai."
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3}),
-    )
-    return qa_chain.run(query)
-
-
-# ---------- Manual router (avoids Groq's native function-calling parsing bug) ----------
-def route_and_answer(user_input: str) -> str:
-    doc_available = st.session_state.vectorstore is not None
-
-    tool_list_text = (
-        '- "WebSearch": current events, prices, live/recent travel info\n'
-        '- "WeatherLookup": current weather for a city (input = just the city name)\n'
-    )
-    if doc_available:
-        tool_list_text += '- "TravelDocsQA": answer using the uploaded travel guide document\n'
-    tool_list_text += '- "none": answer directly from your own knowledge, no tool needed\n'
-
-    router_prompt = f"""You are a routing assistant. Given the user's question, decide which ONE tool to use.
-
-Available tools:
-{tool_list_text}
-Respond with ONLY a JSON object, nothing else, in this exact format:
-{{"tool": "ToolName", "input": "text to pass to the tool"}}
-
-User question: {user_input}"""
-
+def summarize_text(text: str) -> str:
     try:
-        route_response = llm.invoke(router_prompt).content
+        prompt = f"Summarize this research paper abstract in 3-4 simple sentences:\n\n{text}"
+        return llm.invoke(prompt).content
     except Exception as e:
-        return f"Sorry, routing failed: {e}"
+        return f"Summarization error: {e}"
 
-    match = re.search(r"\{.*\}", route_response, re.DOTALL)
-    tool_name = "none"
-    tool_input = user_input
-    if match:
-        try:
-            parsed = json.loads(match.group(0))
-            tool_name = parsed.get("tool", "none")
-            tool_input = parsed.get("input", user_input)
-        except Exception:
-            pass
 
-    if tool_name == "WebSearch":
-        tool_result = run_web_search(tool_input)
-    elif tool_name == "WeatherLookup":
-        tool_result = run_weather_lookup(tool_input)
-    elif tool_name == "TravelDocsQA" and doc_available:
-        tool_result = run_doc_qa(tool_input)
+def format_citation(paper: dict) -> str:
+    authors = ", ".join(paper["authors"][:3])
+    if len(paper["authors"]) > 3:
+        authors += " et al."
+    year = paper["published"][:4]
+    return f"{authors} ({year}). {paper['title']}. arXiv. {paper['url']}"
+
+
+# ---------- Tabs ----------
+tab1, tab2, tab3 = st.tabs(["🔍 Search Papers", "📌 Citations", "🕘 Search History"])
+
+with tab1:
+    st.subheader("Search academic papers on arXiv")
+    query = st.text_input("Search query", placeholder="e.g. large language models reasoning")
+
+    if st.button("Search") and query:
+        with st.spinner("Searching arXiv..."):
+            st.session_state.papers = search_arxiv(query)
+            save_search(query)
+
+    for i, paper in enumerate(st.session_state.papers):
+        with st.container(border=True):
+            st.markdown(f"**{paper['title']}**")
+            st.caption(f"{', '.join(paper['authors'][:3])} — {paper['published']}")
+            st.write(paper["summary"][:300] + "...")
+            st.link_button("View on arXiv", paper["url"])
+
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Summarize", key=f"summarize_{i}"):
+                    with st.spinner("Summarizing..."):
+                        summary = summarize_text(paper["summary"])
+                    st.info(summary)
+            with col2:
+                if st.button("Add to Citations", key=f"cite_{i}"):
+                    citation = format_citation(paper)
+                    if citation not in st.session_state.citations:
+                        st.session_state.citations.append(citation)
+                        st.success("Added to citations!")
+
+with tab2:
+    st.subheader("Your saved citations")
+    if not st.session_state.citations:
+        st.write("Koi citation abhi tak add nahi hui. Search tab se papers add karo.")
     else:
-        tool_result = None
+        for c in st.session_state.citations:
+            st.write(f"- {c}")
 
-    if tool_result is None:
-        final_prompt = f"Answer this travel-related question helpfully and concisely: {user_input}"
-    else:
-        final_prompt = (
-            f"User question: {user_input}\n\n"
-            f"Tool used: {tool_name}\n"
-            f"Tool result: {tool_result}\n\n"
-            f"Using the tool result above, give a natural, helpful, concise answer to the user's question."
+        citation_text = "\n".join(st.session_state.citations)
+        st.download_button(
+            "Download citations (.txt)",
+            citation_text,
+            file_name="citations.txt",
         )
 
-    st.session_state["last_debug"] = {
-        "tool_name": tool_name,
-        "tool_input": tool_input,
-        "tool_result": tool_result,
-    }
+        if st.button("Clear all citations"):
+            st.session_state.citations = []
+            st.rerun()
 
-    try:
-        final_response = llm.invoke(final_prompt).content
-        return final_response
-    except Exception as e:
-        return f"Sorry, kuch galat ho gaya: {e}"
-
-
-# ---------- Chat UI ----------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-user_input = st.chat_input("Apni trip ke baare me kuch bhi pucho...")
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.write(user_input)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = route_and_answer(user_input)
-        st.write(response)
-        with st.expander("🔧 Debug: which tool was used"):
-            st.json(st.session_state.get("last_debug", {}))
-
-    st.session_state.messages.append({"role": "assistant", "content": response})
+with tab3:
+    st.subheader("Recent searches")
+    history = get_history()
+    if not history:
+        st.write("Koi search history nahi hai abhi tak.")
+    else:
+        for q, ts in history:
+            st.write(f"- **{q}** — {ts}")
+    st.caption(
+        "Note: Streamlit Cloud pe storage temporary hai — reboot/redeploy hone par history reset ho sakti hai."
+    )
