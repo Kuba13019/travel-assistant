@@ -140,12 +140,18 @@ if user_input:
         st.write(user_input)
 
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                result = agent_executor.invoke({"input": user_input})
-                response = result["output"]
-            except Exception as e:
-                response = f"Sorry, failed: {e}"
+       with st.spinner("Thinking..."):
+    response = None
+    last_error = None
+    for attempt in range(2):
+        try:
+            result = agent_executor.invoke({"input": user_input})
+            response = result["output"]
+            break
+        except Exception as e:
+            last_error = e
+    if response is None:
+        response = f"Sorry, failed after retry: {last_error}"
         st.write(response)
 
     st.session_state.messages.append({"role": "assistant", "content": response})
