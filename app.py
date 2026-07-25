@@ -73,13 +73,14 @@ if "citations" not in st.session_state:
 # ---------- Helper functions ----------
 def search_arxiv(query: str, max_results: int = 5):
     try:
+        client = arxiv.Client()
         search = arxiv.Search(
             query=query,
             max_results=max_results,
             sort_by=arxiv.SortCriterion.Relevance,
         )
         results = []
-        for paper in search.results():
+        for paper in client.results(search):
             results.append({
                 "title": paper.title,
                 "authors": [a.name for a in paper.authors],
