@@ -144,7 +144,7 @@ if user_input:
         with st.spinner("Thinking..."):
             response = None
             last_error = None
-            for attempt in range(2):
+            for attempt in range(4):
                 try:
                     result = agent_executor.invoke({"input": user_input})
                     response = result["output"]
