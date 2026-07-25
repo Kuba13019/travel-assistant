@@ -25,8 +25,7 @@ if not GROQ_API_KEY:
     st.error("GROQ_API_KEY set nahi hai. Streamlit Cloud app settings -> Secrets me add karo.")
     st.stop()
 
-llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=GROQ_API_KEY)
-
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
 
 @st.cache_resource
 def load_embeddings():
