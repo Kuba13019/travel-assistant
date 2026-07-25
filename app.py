@@ -27,6 +27,7 @@ if not GROQ_API_KEY:
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
 
+
 @st.cache_resource
 def load_embeddings():
     return FakeEmbeddings(size=768)
@@ -140,18 +141,18 @@ if user_input:
         st.write(user_input)
 
     with st.chat_message("assistant"):
-       with st.spinner("Thinking..."):
-    response = None
-    last_error = None
-    for attempt in range(2):
-        try:
-            result = agent_executor.invoke({"input": user_input})
-            response = result["output"]
-            break
-        except Exception as e:
-            last_error = e
-    if response is None:
-        response = f"Sorry, failed after retry: {last_error}"
+        with st.spinner("Thinking..."):
+            response = None
+            last_error = None
+            for attempt in range(2):
+                try:
+                    result = agent_executor.invoke({"input": user_input})
+                    response = result["output"]
+                    break
+                except Exception as e:
+                    last_error = e
+            if response is None:
+                response = f"Sorry, failed after retry: {last_error}"
         st.write(response)
 
     st.session_state.messages.append({"role": "assistant", "content": response})
