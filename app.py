@@ -159,6 +159,12 @@ User question: {user_input}"""
             f"Using the tool result above, give a natural, helpful, concise answer to the user's question."
         )
 
+    st.session_state["last_debug"] = {
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_result": tool_result,
+    }
+
     try:
         final_response = llm.invoke(final_prompt).content
         return final_response
@@ -184,5 +190,7 @@ if user_input:
         with st.spinner("Thinking..."):
             response = route_and_answer(user_input)
         st.write(response)
+        with st.expander("🔧 Debug: which tool was used"):
+            st.json(st.session_state.get("last_debug", {}))
 
     st.session_state.messages.append({"role": "assistant", "content": response})
