@@ -8,7 +8,8 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import FakeEmbeddings
 from langchain_groq import ChatGroq
 from langchain.chains import RetrievalQA
-from langchain.agents import Tool, AgentExecutor, create_tool_calling_agent
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.tools import DuckDuckGoSearchRun
 
@@ -61,11 +62,19 @@ if uploaded_file is not None:
     except Exception as e:
         st.sidebar.error(f"Document process karne me error: {e}")
 
-# ---------- Tools ----------
-search_tool = DuckDuckGoSearchRun()
+# ---------- Tools (using @tool decorator for correct schema with tool-calling agent) ----------
+search_tool_runner = DuckDuckGoSearchRun()
 
 
-def get_weather(city: str) -> str:
+@tool
+def WebSearch(query: str) -> str:
+    """Search the web for current events, prices, or any live/recent travel information."""
+    return search_tool_runner.run(query)
+
+
+@tool
+def WeatherLookup(city: str) -> str:
+    """Get the current weather for a city. Input should be just the city name, e.g. 'Goa'."""
     if not OPENWEATHER_API_KEY:
         return "Weather API key configured nahi hai."
     url = (
@@ -86,34 +95,19 @@ def get_weather(city: str) -> str:
         return f"Weather fetch error: {e}"
 
 
-tools = [
-    Tool(
-        name="WebSearch",
-        func=search_tool.run,
-        description="Current events, prices, ya live/recent travel info dhoondne ke liye use karo.",
-    ),
-    Tool(
-        name="WeatherLookup",
-        func=get_weather,
-        description="Kisi city ka current weather jaanne ke liye use karo. Input sirf city ka naam ho.",
-    ),
-]
+tools = [WebSearch, WeatherLookup]
 
 if st.session_state.vectorstore is not None:
-    def doc_qa(query: str) -> str:
+    @tool
+    def TravelDocsQA(query: str) -> str:
+        """Answer questions using the uploaded travel guide document."""
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             retriever=st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3}),
         )
         return qa_chain.run(query)
 
-    tools.append(
-        Tool(
-            name="TravelDocsQA",
-            func=doc_qa,
-            description="Uploaded travel guide document se related sawaal answer karne ke liye use karo.",
-        )
-    )
+    tools.append(TravelDocsQA)
 
 # ---------- Tool-calling agent (reliable with Groq models) ----------
 agent_prompt = ChatPromptTemplate.from_messages([
@@ -154,8 +148,5 @@ if user_input:
             except Exception as e:
                 response = f"Sorry, failed: {e}"
         st.write(response)
-
-        with st.expander("🔧 Debug: Weather tool direct test"):
-            st.write(get_weather("Goa"))
 
     st.session_state.messages.append({"role": "assistant", "content": response})
