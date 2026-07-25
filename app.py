@@ -67,7 +67,14 @@ search_tool_runner = DuckDuckGoSearchRun()
 
 def run_web_search(query: str) -> str:
     try:
-        return search_tool_runner.run(query)
+        result = search_tool_runner.run(query)
+        if "No good DuckDuckGo Search Result" in result or not result.strip():
+            simplified = re.sub(
+                r"\b(right now|currently|today|at the moment|these days)\b", "", query, flags=re.IGNORECASE
+            ).strip()
+            if simplified and simplified != query:
+                result = search_tool_runner.run(simplified)
+        return result
     except Exception as e:
         return f"Web search error: {e}"
 
