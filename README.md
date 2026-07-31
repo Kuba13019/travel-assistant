@@ -1,35 +1,40 @@
-# AI Research Helper
+# AI Travel Assistant
 
-An AI-powered research assistant that helps you search academic papers on arXiv, summarize them, manage citations, and chat with an assistant that can pull in relevant papers automatically. Built with LangChain, Groq (LLM), and Streamlit.
+An AI-powered travel assistant with a RAG chatbot, live web search, weather lookup, flight search, and AI-generated itineraries. Built with LangChain, Groq (LLM), and Streamlit.
 
 ## Features
 
-- 💬 **Chat interface** — ask research questions in natural language; the assistant decides whether to search arXiv or answer directly
-- 🔍 **Paper search** — search arXiv for academic papers, displayed as result cards with title, authors, date, and abstract
-- 📝 **Summarization** — one-click AI summary of any paper's abstract
-- 📌 **Citation management** — save citations from search results and export them as a `.txt` file
-- 🕘 **Search history** — past searches are logged with timestamps (SQLite)
-- ✅ **Input validation** — empty/too-short/too-long queries are rejected with a clear message before hitting any API
+- 💬 **Chat interface** — ask travel questions; the assistant routes to Web Search, Weather, or your uploaded travel document as needed
+- 📄 **Document upload (RAG)** — upload a travel guide (PDF/TXT) and ask questions about it
+- 🌦️ **Weather lookup** — current weather for any city (OpenWeatherMap)
+- ✈️ **Flight search** — search flights between airports (Aviationstack API)
+- 🗺️ **Itinerary generator** — AI-generated day-by-day itinerary for any destination
+- 🕘 **Search history** — flight and itinerary searches are logged (SQLite)
+- ✅ **Input validation** — empty/invalid inputs are rejected with a clear message
 
 ## Tech stack
 
 - LangChain + Groq (`llama-3.3-70b-versatile`)
-- `arxiv` Python package (free, no API key required)
+- FAISS (vector store for RAG)
+- DuckDuckGo Search (web search tool)
+- OpenWeatherMap API (weather)
+- Aviationstack API (flights)
 - SQLite (search history)
 - Streamlit (UI + deployment)
 
 ## Setup — run locally
 
-1. Clone this repo and install dependencies:
+1. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-2. Create a `.streamlit/secrets.toml` file in the project root:
+2. Create `.streamlit/secrets.toml`:
    ```toml
-   GROQ_API_KEY = "your-groq-api-key-here"
+   GROQ_API_KEY = "your-groq-api-key"
+   OPENWEATHER_API_KEY = "your-openweather-api-key"
+   AVIATIONSTACK_API_KEY = "your-aviationstack-api-key"
    ```
-   Get a free key at [console.groq.com](https://console.groq.com).
-3. Run the app:
+3. Run:
    ```bash
    streamlit run app.py
    ```
@@ -37,23 +42,13 @@ An AI-powered research assistant that helps you search academic papers on arXiv,
 ## Setup — deploy on Streamlit Cloud
 
 1. Push this repo to GitHub.
-2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
-3. Click **New app**, select this repo, and set the main file to `app.py`.
-4. In the app's **Settings → Secrets**, add:
-   ```
-   GROQ_API_KEY = "your-groq-api-key-here"
-   ```
-5. Deploy. First build takes a couple of minutes.
-
-## Project structure
-
-```
-├── app.py              # Main Streamlit app
-├── requirements.txt    # Python dependencies
-└── README.md           # This file
-```
+2. Go to [share.streamlit.io](https://share.streamlit.io), sign in with GitHub.
+3. **New app** → select this repo → main file `app.py`.
+4. In **Settings → Secrets**, add all three keys shown above.
+5. Deploy.
 
 ## Known limitations
 
-- Search history and citations are stored per-session / in a local SQLite file, which resets when the Streamlit Cloud app reboots or redeploys. For persistent storage across restarts, a hosted database (e.g. Supabase, PostgreSQL) would be needed.
-- Web/paper search quality depends on the arXiv API and the underlying LLM's routing decisions; results may occasionally be imperfect for very broad or ambiguous queries.
+- Search history (SQLite) resets when the Streamlit Cloud app reboots/redeploys — a hosted database would be needed for persistence.
+- Aviationstack free tier has limited monthly requests and mainly returns real-time/scheduled flight data rather than bookable fares.
+- Web search quality depends on DuckDuckGo's free API, which occasionally returns no results for very broad queries.
