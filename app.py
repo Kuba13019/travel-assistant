@@ -1,17 +1,28 @@
 import os
+import json
+import re
 import sqlite3
 from datetime import datetime
 
 import streamlit as st
-import arxiv
+import requests
+
+from langchain_community.document_loaders import PyPDFLoader, TextLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import FakeEmbeddings
 from langchain_groq import ChatGroq
+from langchain.chains import RetrievalQA
+from langchain_community.tools import DuckDuckGoSearchRun
 
-st.set_page_config(page_title="AI Research Helper", page_icon="📚", layout="wide")
-st.title("📚 AI Research Helper")
-st.caption("arXiv Search + Summarization + Citations + History + Chat — powered by LangChain + Groq")
+st.set_page_config(page_title="AI Travel Assistant", page_icon="✈️", layout="wide")
+st.title("✈️ AI Travel Assistant")
+st.caption("RAG Chat + Web Search + Weather + Flights + Itinerary — powered by LangChain + Groq")
 
-# ---------- API key ----------
+# ---------- API keys (Streamlit Cloud secrets, or local env vars) ----------
 GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", os.environ.get("OPENWEATHER_API_KEY", ""))
+AVIATIONSTACK_API_KEY = st.secrets.get("AVIATIONSTACK_API_KEY", os.environ.get("AVIATIONSTACK_API_KEY", ""))
 
 if not GROQ_API_KEY:
     st.error("GROQ_API_KEY set nahi hai. Streamlit Cloud app settings -> Secrets me add karo.")
@@ -19,8 +30,16 @@ if not GROQ_API_KEY:
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
 
-# ---------- SQLite setup (search history) ----------
-DB_PATH = "research_helper.db"
+
+@st.cache_resource
+def load_embeddings():
+    return FakeEmbeddings(size=768)
+
+
+embeddings_model = load_embeddings()
+
+# ---------- SQLite setup (saved searches) ----------
+DB_PATH = "travel_assistant.db"
 
 
 def get_connection():
@@ -31,9 +50,10 @@ def init_db():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS search_history (
+        CREATE TABLE IF NOT EXISTS searches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query TEXT,
+            search_type TEXT,
+            details TEXT,
             timestamp TEXT
         )
     """)
@@ -41,21 +61,21 @@ def init_db():
     conn.close()
 
 
-def save_search(query: str):
+def save_search(search_type: str, details: str):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO search_history (query, timestamp) VALUES (?, ?)",
-        (query, datetime.now().isoformat(timespec="seconds")),
+        "INSERT INTO searches (search_type, details, timestamp) VALUES (?, ?, ?)",
+        (search_type, details, datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()
     conn.close()
 
 
-def get_history():
+def get_searches():
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT query, timestamp FROM search_history ORDER BY id DESC LIMIT 50")
+    cursor.execute("SELECT search_type, details, timestamp FROM searches ORDER BY id DESC LIMIT 50")
     rows = cursor.fetchall()
     conn.close()
     return rows
@@ -64,104 +84,182 @@ def get_history():
 init_db()
 
 # ---------- Session state ----------
-if "papers" not in st.session_state:
-    st.session_state.papers = []
-if "citations" not in st.session_state:
-    st.session_state.citations = []
+if "vectorstore" not in st.session_state:
+    st.session_state.vectorstore = None
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
 
 
 # ---------- Input validation ----------
-def validate_query(query: str):
-    """Returns (is_valid, error_message)."""
-    query = query.strip()
-    if not query:
-        return False, "Search query khali nahi ho sakti."
-    if len(query) < 3:
-        return False, "Search query kam se kam 3 characters ki honi chahiye."
-    if len(query) > 300:
-        return False, "Search query bahut lambi hai (max 300 characters)."
+def validate_text_input(value: str, field_name: str, min_len: int = 2, max_len: int = 200):
+    value = value.strip()
+    if not value:
+        return False, f"{field_name} khali nahi ho sakta."
+    if len(value) < min_len:
+        return False, f"{field_name} kam se kam {min_len} characters ka hona chahiye."
+    if len(value) > max_len:
+        return False, f"{field_name} bahut lamba hai (max {max_len} characters)."
     return True, ""
 
 
-# ---------- Helper functions ----------
-def search_arxiv(query: str, max_results: int = 5):
+# ---------- Sidebar: document upload (RAG) ----------
+st.sidebar.header("📄 Travel Document Upload")
+uploaded_file = st.sidebar.file_uploader("PDF ya TXT travel guide upload karo", type=["pdf", "txt"])
+
+if uploaded_file is not None:
+    temp_path = f"temp_{uploaded_file.name}"
+    with open(temp_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
     try:
-        client = arxiv.Client()
-        search = arxiv.Search(
-            query=query,
-            max_results=max_results,
-            sort_by=arxiv.SortCriterion.Relevance,
-        )
-        results = []
-        for paper in client.results(search):
-            results.append({
-                "title": paper.title,
-                "authors": [a.name for a in paper.authors],
-                "summary": paper.summary,
-                "published": str(paper.published.date()),
-                "url": paper.entry_id,
-            })
-        return results
+        if uploaded_file.name.lower().endswith(".pdf"):
+            loader = PyPDFLoader(temp_path)
+        else:
+            loader = TextLoader(temp_path)
+        docs = loader.load()
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = splitter.split_documents(docs)
+        st.session_state.vectorstore = FAISS.from_documents(chunks, embeddings_model)
+        st.sidebar.success(f"Document processed! ({len(chunks)} chunks)")
     except Exception as e:
-        st.error(f"arXiv search error: {e}")
-        return []
+        st.sidebar.error(f"Document process karne me error: {e}")
+
+# ---------- Tool functions ----------
+search_tool_runner = DuckDuckGoSearchRun()
 
 
-def summarize_text(text: str) -> str:
+def run_web_search(query: str) -> str:
     try:
-        prompt = f"Summarize this research paper abstract in 3-4 simple sentences:\n\n{text}"
+        result = search_tool_runner.run(query)
+        if "No good DuckDuckGo Search Result" in result or not result.strip():
+            simplified = re.sub(
+                r"\b(right now|currently|today|at the moment|these days)\b", "", query, flags=re.IGNORECASE
+            ).strip()
+            if simplified and simplified != query:
+                result = search_tool_runner.run(simplified)
+        return result
+    except Exception as e:
+        return f"Web search error: {e}"
+
+
+def run_weather_lookup(city: str) -> str:
+    if not OPENWEATHER_API_KEY:
+        return "Weather API key configured nahi hai."
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        if data.get("cod") != 200:
+            return f"Sorry, '{city}' ka weather nahi mil paya. ({data.get('message', 'unknown error')})"
+        temp = data["main"]["temp"]
+        desc = data["weather"][0]["description"]
+        return f"{city} mein abhi {temp}°C hai, aasman: {desc}"
+    except Exception as e:
+        return f"Weather fetch error: {e}"
+
+
+def run_doc_qa(query: str) -> str:
+    if st.session_state.vectorstore is None:
+        return "Koi document upload nahi kiya gaya hai."
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=llm, retriever=st.session_state.vectorstore.as_retriever(search_kwargs={"k": 3})
+    )
+    return qa_chain.run(query)
+
+
+def search_flights(dep_iata: str, arr_iata: str):
+    if not AVIATIONSTACK_API_KEY:
+        return None, "Aviationstack API key configured nahi hai."
+    url = (
+        f"http://api.aviationstack.com/v1/flights"
+        f"?access_key={AVIATIONSTACK_API_KEY}&dep_iata={dep_iata}&arr_iata={arr_iata}&limit=5"
+    )
+    try:
+        response = requests.get(url, timeout=15)
+        data = response.json()
+        if "error" in data:
+            return None, data["error"].get("message", "Unknown API error")
+        flights = data.get("data", [])
+        if not flights:
+            return [], None
+        results = []
+        for f in flights:
+            results.append({
+                "airline": f.get("airline", {}).get("name", "N/A"),
+                "flight_number": f.get("flight", {}).get("iata", "N/A"),
+                "departure_airport": f.get("departure", {}).get("airport", "N/A"),
+                "departure_time": f.get("departure", {}).get("scheduled", "N/A"),
+                "arrival_airport": f.get("arrival", {}).get("airport", "N/A"),
+                "arrival_time": f.get("arrival", {}).get("scheduled", "N/A"),
+                "status": f.get("flight_status", "N/A"),
+            })
+        return results, None
+    except Exception as e:
+        return None, str(e)
+
+
+def generate_itinerary(destination: str, days: int, interests: str) -> str:
+    prompt = (
+        f"Create a simple day-by-day travel itinerary for {days} days in {destination}. "
+        f"The traveler is interested in: {interests if interests else 'general sightseeing'}. "
+        f"Format it clearly with a heading for each day and 2-3 activities per day. Keep it concise."
+    )
+    try:
         return llm.invoke(prompt).content
     except Exception as e:
-        return f"Summarization error: {e}"
+        return f"Itinerary generation error: {e}"
 
 
-def format_citation(paper: dict) -> str:
-    authors = ", ".join(paper["authors"][:3])
-    if len(paper["authors"]) > 3:
-        authors += " et al."
-    year = paper["published"][:4]
-    return f"{authors} ({year}). {paper['title']}. arXiv. {paper['url']}"
+# ---------- Chat router ----------
+def route_and_answer(user_input: str) -> str:
+    doc_available = st.session_state.vectorstore is not None
+    tool_list_text = (
+        '- "WebSearch": current events, prices, live/recent travel info\n'
+        '- "WeatherLookup": current weather for a city (input = just the city name)\n'
+    )
+    if doc_available:
+        tool_list_text += '- "TravelDocsQA": answer using the uploaded travel guide document\n'
+    tool_list_text += '- "none": answer directly from your own knowledge, no tool needed\n'
 
+    router_prompt = f"""You are a routing assistant. Given the user's question, decide which ONE tool to use.
 
-def chat_with_assistant(user_input: str) -> str:
-    """Simple router: decide if the question needs an arXiv search or can be answered directly."""
-    router_prompt = f"""You are a research assistant. Decide if answering this question requires
-searching arXiv for papers, or if it can be answered directly from general knowledge.
-
-Respond with ONLY a JSON object: {{"needs_search": true/false, "search_query": "..."}}
+Available tools:
+{tool_list_text}
+Respond with ONLY a JSON object, nothing else, in this exact format:
+{{"tool": "ToolName", "input": "text to pass to the tool"}}
 
 User question: {user_input}"""
-    try:
-        import json
-        import re
-        route_raw = llm.invoke(router_prompt).content
-        match = re.search(r"\{.*\}", route_raw, re.DOTALL)
-        needs_search = False
-        search_query = user_input
-        if match:
-            parsed = json.loads(match.group(0))
-            needs_search = parsed.get("needs_search", False)
-            search_query = parsed.get("search_query", user_input)
-    except Exception:
-        needs_search = False
-        search_query = user_input
 
-    if needs_search:
-        papers = search_arxiv(search_query, max_results=3)
-        if not papers:
-            context = "No relevant papers found on arXiv."
-        else:
-            context = "\n\n".join(
-                f"- {p['title']} ({p['published'][:4]}): {p['summary'][:200]}..." for p in papers
-            )
-        final_prompt = (
-            f"User question: {user_input}\n\nRelevant papers found:\n{context}\n\n"
-            f"Answer the user's question using these papers, in a helpful and concise way."
-        )
+    try:
+        route_response = llm.invoke(router_prompt).content
+    except Exception as e:
+        return f"Sorry, routing failed: {e}"
+
+    match = re.search(r"\{.*\}", route_response, re.DOTALL)
+    tool_name, tool_input = "none", user_input
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            tool_name = parsed.get("tool", "none")
+            tool_input = parsed.get("input", user_input)
+        except Exception:
+            pass
+
+    if tool_name == "WebSearch":
+        tool_result = run_web_search(tool_input)
+    elif tool_name == "WeatherLookup":
+        tool_result = run_weather_lookup(tool_input)
+    elif tool_name == "TravelDocsQA" and doc_available:
+        tool_result = run_doc_qa(tool_input)
     else:
-        final_prompt = f"Answer this research-related question helpfully and concisely: {user_input}"
+        tool_result = None
+
+    if tool_result is None:
+        final_prompt = f"Answer this travel-related question helpfully and concisely: {user_input}"
+    else:
+        final_prompt = (
+            f"User question: {user_input}\n\nTool used: {tool_name}\nTool result: {tool_result}\n\n"
+            f"Using the tool result above, give a natural, helpful, concise answer to the user's question."
+        )
 
     try:
         return llm.invoke(final_prompt).content
@@ -170,89 +268,86 @@ User question: {user_input}"""
 
 
 # ---------- Tabs ----------
-tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "🔍 Search Papers", "📌 Citations", "🕘 Search History"])
+tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "✈️ Flights", "🗺️ Itinerary", "🕘 Search History"])
 
 with tab1:
-    st.subheader("Ask the Research Assistant")
+    st.subheader("Chat with your Travel Assistant")
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    chat_input = st.chat_input("Ask a research question...")
-    if chat_input:
-        is_valid, error_msg = validate_query(chat_input)
+    user_input = st.chat_input("Apni trip ke baare me kuch bhi pucho...")
+    if user_input:
+        is_valid, error_msg = validate_text_input(user_input, "Question", min_len=3, max_len=500)
         if not is_valid:
             st.warning(error_msg)
         else:
-            st.session_state.chat_messages.append({"role": "user", "content": chat_input})
+            st.session_state.chat_messages.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
-                st.write(chat_input)
+                st.write(user_input)
             with st.chat_message("assistant"):
                 with st.spinner("Thinking..."):
-                    reply = chat_with_assistant(chat_input)
-                st.write(reply)
-            st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+                    response = route_and_answer(user_input)
+                st.write(response)
+            st.session_state.chat_messages.append({"role": "assistant", "content": response})
 
 with tab2:
-    st.subheader("Search academic papers on arXiv")
-    query = st.text_input("Search query", placeholder="e.g. large language models reasoning")
+    st.subheader("Search Flights")
+    st.caption("Aviationstack free API — enter 3-letter airport codes, e.g. DEL, BOM, GOI, JFK")
+    col1, col2 = st.columns(2)
+    with col1:
+        dep_iata = st.text_input("Departure airport (IATA code)", placeholder="DEL").upper()
+    with col2:
+        arr_iata = st.text_input("Arrival airport (IATA code)", placeholder="BOM").upper()
 
-    if st.button("Search"):
-        is_valid, error_msg = validate_query(query)
+    if st.button("Search Flights"):
+        valid_dep, err1 = validate_text_input(dep_iata, "Departure code", min_len=3, max_len=3)
+        valid_arr, err2 = validate_text_input(arr_iata, "Arrival code", min_len=3, max_len=3)
+        if not valid_dep:
+            st.warning(err1)
+        elif not valid_arr:
+            st.warning(err2)
+        else:
+            with st.spinner("Searching flights..."):
+                flights, error = search_flights(dep_iata, arr_iata)
+                save_search("flight", f"{dep_iata} -> {arr_iata}")
+            if error:
+                st.error(f"Flight search error: {error}")
+            elif not flights:
+                st.info("Is route ke liye koi flight nahi mili.")
+            else:
+                for f in flights:
+                    with st.container(border=True):
+                        st.markdown(f"**{f['airline']} — {f['flight_number']}**")
+                        st.write(f"{f['departure_airport']} ({f['departure_time']}) → "
+                                 f"{f['arrival_airport']} ({f['arrival_time']})")
+                        st.caption(f"Status: {f['status']}")
+
+with tab3:
+    st.subheader("Generate a Travel Itinerary")
+    destination = st.text_input("Destination", placeholder="e.g. Goa")
+    days = st.number_input("Number of days", min_value=1, max_value=30, value=3)
+    interests = st.text_input("Interests (optional)", placeholder="e.g. beaches, food, nightlife")
+
+    if st.button("Generate Itinerary"):
+        is_valid, error_msg = validate_text_input(destination, "Destination", min_len=2, max_len=100)
         if not is_valid:
             st.warning(error_msg)
         else:
-            with st.spinner("Searching arXiv..."):
-                st.session_state.papers = search_arxiv(query)
-                save_search(query)
-
-    for i, paper in enumerate(st.session_state.papers):
-        with st.container(border=True):
-            st.markdown(f"**{paper['title']}**")
-            st.caption(f"{', '.join(paper['authors'][:3])} — {paper['published']}")
-            st.write(paper["summary"][:300] + "...")
-            st.link_button("View on arXiv", paper["url"])
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Summarize", key=f"summarize_{i}"):
-                    with st.spinner("Summarizing..."):
-                        summary = summarize_text(paper["summary"])
-                    st.info(summary)
-            with col2:
-                if st.button("Add to Citations", key=f"cite_{i}"):
-                    citation = format_citation(paper)
-                    if citation not in st.session_state.citations:
-                        st.session_state.citations.append(citation)
-                        st.success("Added to citations!")
-
-with tab3:
-    st.subheader("Your saved citations")
-    if not st.session_state.citations:
-        st.write("Koi citation abhi tak add nahi hui. Search tab se papers add karo.")
-    else:
-        for c in st.session_state.citations:
-            st.write(f"- {c}")
-
-        citation_text = "\n".join(st.session_state.citations)
-        st.download_button(
-            "Download citations (.txt)",
-            citation_text,
-            file_name="citations.txt",
-        )
-
-        if st.button("Clear all citations"):
-            st.session_state.citations = []
-            st.rerun()
+            with st.spinner("Generating itinerary..."):
+                itinerary = generate_itinerary(destination, int(days), interests)
+                save_search("itinerary", f"{destination} - {days} days")
+            st.markdown(itinerary)
+            st.download_button("Download itinerary (.txt)", itinerary, file_name=f"{destination}_itinerary.txt")
 
 with tab4:
     st.subheader("Recent searches")
-    history = get_history()
+    history = get_searches()
     if not history:
         st.write("Koi search history nahi hai abhi tak.")
     else:
-        for q, ts in history:
-            st.write(f"- **{q}** — {ts}")
+        for search_type, details, ts in history:
+            st.write(f"- **[{search_type}]** {details} — {ts}")
     st.caption(
         "Note: Streamlit Cloud pe storage temporary hai — reboot/redeploy hone par history reset ho sakti hai."
     )
