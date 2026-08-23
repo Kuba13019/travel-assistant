@@ -7,3 +7,4 @@ faiss-cpu
 pypdf
 duckduckgo-search
 requests
+pandas
