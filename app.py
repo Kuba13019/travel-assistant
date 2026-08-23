@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime
 
 import streamlit as st
+import pandas as pd
 import requests
 
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
@@ -88,6 +89,14 @@ if "vectorstore" not in st.session_state:
     st.session_state.vectorstore = None
 if "chat_messages" not in st.session_state:
     st.session_state.chat_messages = []
+if "last_itinerary" not in st.session_state:
+    st.session_state.last_itinerary = None
+if "last_itinerary_dest" not in st.session_state:
+    st.session_state.last_itinerary_dest = ""
+if "last_flights" not in st.session_state:
+    st.session_state.last_flights = None
+if "last_weather" not in st.session_state:
+    st.session_state.last_weather = None
 
 
 # ---------- Input validation ----------
@@ -99,6 +108,15 @@ def validate_text_input(value: str, field_name: str, min_len: int = 2, max_len: 
         return False, f"{field_name} kam se kam {min_len} characters ka hona chahiye."
     if len(value) > max_len:
         return False, f"{field_name} bahut lamba hai (max {max_len} characters)."
+    return True, ""
+
+
+def validate_iata_code(value: str, field_name: str):
+    value = value.strip().upper()
+    if not value:
+        return False, f"{field_name} khali nahi ho sakta."
+    if not re.fullmatch(r"[A-Z]{3}", value):
+        return False, f"{field_name} exactly 3 letters ka IATA code hona chahiye (e.g. DEL, BOM)."
     return True, ""
 
 
@@ -122,6 +140,9 @@ if uploaded_file is not None:
         st.sidebar.success(f"Document processed! ({len(chunks)} chunks)")
     except Exception as e:
         st.sidebar.error(f"Document process karne me error: {e}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 # ---------- Tool functions ----------
 search_tool_runner = DuckDuckGoSearchRun()
@@ -141,20 +162,36 @@ def run_web_search(query: str) -> str:
         return f"Web search error: {e}"
 
 
-def run_weather_lookup(city: str) -> str:
+def run_weather_lookup(city: str):
+    """Returns (result_dict_or_None, error_message_or_None) for card display, plus a text summary."""
     if not OPENWEATHER_API_KEY:
-        return "Weather API key configured nahi hai."
+        return None, "Weather API key configured nahi hai."
     url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
     try:
         response = requests.get(url, timeout=10)
         data = response.json()
         if data.get("cod") != 200:
-            return f"Sorry, '{city}' ka weather nahi mil paya. ({data.get('message', 'unknown error')})"
-        temp = data["main"]["temp"]
-        desc = data["weather"][0]["description"]
-        return f"{city} mein abhi {temp}°C hai, aasman: {desc}"
+            return None, f"Sorry, '{city}' ka weather nahi mil paya. ({data.get('message', 'unknown error')})"
+        result = {
+            "city": data.get("name", city),
+            "country": data.get("sys", {}).get("country", ""),
+            "temp": data["main"]["temp"],
+            "feels_like": data["main"]["feels_like"],
+            "humidity": data["main"]["humidity"],
+            "wind": data.get("wind", {}).get("speed", 0),
+            "description": data["weather"][0]["description"].title(),
+        }
+        return result, None
     except Exception as e:
-        return f"Weather fetch error: {e}"
+        return None, f"Weather fetch error: {e}"
+
+
+def run_weather_lookup_text(city: str) -> str:
+    """Text-only version used by the chat router tool."""
+    result, error = run_weather_lookup(city)
+    if error:
+        return error
+    return f"{result['city']} mein abhi {result['temp']}°C hai, aasman: {result['description']}"
 
 
 def run_doc_qa(query: str) -> str:
@@ -201,7 +238,8 @@ def generate_itinerary(destination: str, days: int, interests: str) -> str:
     prompt = (
         f"Create a simple day-by-day travel itinerary for {days} days in {destination}. "
         f"The traveler is interested in: {interests if interests else 'general sightseeing'}. "
-        f"Format it clearly with a heading for each day and 2-3 activities per day. Keep it concise."
+        f"Format it clearly with a '## Day N: <short title>' heading for each day, followed by "
+        f"2-3 bullet point activities. Keep it concise."
     )
     try:
         return llm.invoke(prompt).content
@@ -247,7 +285,7 @@ User question: {user_input}"""
     if tool_name == "WebSearch":
         tool_result = run_web_search(tool_input)
     elif tool_name == "WeatherLookup":
-        tool_result = run_weather_lookup(tool_input)
+        tool_result = run_weather_lookup_text(tool_input)
     elif tool_name == "TravelDocsQA" and doc_available:
         tool_result = run_doc_qa(tool_input)
     else:
@@ -268,8 +306,11 @@ User question: {user_input}"""
 
 
 # ---------- Tabs ----------
-tab1, tab2, tab3, tab4 = st.tabs(["💬 Chat", "✈️ Flights", "🗺️ Itinerary", "🕘 Search History"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["💬 Chat", "🌦️ Weather", "✈️ Flights", "🗺️ Itinerary", "🕘 Search History"]
+)
 
+# ===================== TAB 1: CHAT =====================
 with tab1:
     st.subheader("Chat with your Travel Assistant")
     for msg in st.session_state.chat_messages:
@@ -291,7 +332,45 @@ with tab1:
                 st.write(response)
             st.session_state.chat_messages.append({"role": "assistant", "content": response})
 
+    if st.session_state.chat_messages:
+        chat_text = "\n\n".join(
+            f"{m['role'].upper()}: {m['content']}" for m in st.session_state.chat_messages
+        )
+        st.download_button(
+            "⬇️ Export chat (.txt)", chat_text, file_name="chat_history.txt", mime="text/plain"
+        )
+
+# ===================== TAB 2: WEATHER =====================
 with tab2:
+    st.subheader("Weather Lookup")
+    city_input = st.text_input("City name", placeholder="e.g. Goa")
+
+    if st.button("Get Weather", type="primary"):
+        is_valid, error_msg = validate_text_input(city_input, "City name", min_len=2, max_len=100)
+        if not is_valid:
+            st.warning(error_msg)
+        else:
+            with st.spinner("Fetching weather..."):
+                result, error = run_weather_lookup(city_input)
+            if error:
+                st.error(error)
+                st.session_state.last_weather = None
+            else:
+                st.session_state.last_weather = result
+
+    if st.session_state.last_weather:
+        w = st.session_state.last_weather
+        with st.container(border=True):
+            st.subheader(f"{w['city']}, {w['country']}")
+            st.caption(w["description"])
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Temperature", f"{w['temp']} °C")
+            c2.metric("Feels like", f"{w['feels_like']} °C")
+            c3.metric("Humidity", f"{w['humidity']}%")
+            st.caption(f"Wind speed: {w['wind']} m/s")
+
+# ===================== TAB 3: FLIGHTS =====================
+with tab3:
     st.subheader("Search Flights")
     st.caption("Aviationstack free API — enter 3-letter airport codes, e.g. DEL, BOM, GOI, JFK")
     col1, col2 = st.columns(2)
@@ -301,29 +380,48 @@ with tab2:
         arr_iata = st.text_input("Arrival airport (IATA code)", placeholder="BOM").upper()
 
     if st.button("Search Flights"):
-        valid_dep, err1 = validate_text_input(dep_iata, "Departure code", min_len=3, max_len=3)
-        valid_arr, err2 = validate_text_input(arr_iata, "Arrival code", min_len=3, max_len=3)
+        valid_dep, err1 = validate_iata_code(dep_iata, "Departure code")
+        valid_arr, err2 = validate_iata_code(arr_iata, "Arrival code")
         if not valid_dep:
             st.warning(err1)
         elif not valid_arr:
             st.warning(err2)
+        elif dep_iata == arr_iata:
+            st.warning("Departure aur arrival airport same nahi ho sakte.")
         else:
             with st.spinner("Searching flights..."):
                 flights, error = search_flights(dep_iata, arr_iata)
                 save_search("flight", f"{dep_iata} -> {arr_iata}")
             if error:
                 st.error(f"Flight search error: {error}")
+                st.session_state.last_flights = None
             elif not flights:
                 st.info("Is route ke liye koi flight nahi mili.")
+                st.session_state.last_flights = None
             else:
-                for f in flights:
-                    with st.container(border=True):
-                        st.markdown(f"**{f['airline']} — {f['flight_number']}**")
-                        st.write(f"{f['departure_airport']} ({f['departure_time']}) → "
-                                 f"{f['arrival_airport']} ({f['arrival_time']})")
-                        st.caption(f"Status: {f['status']}")
+                st.session_state.last_flights = flights
 
-with tab3:
+    if st.session_state.last_flights:
+        for f in st.session_state.last_flights:
+            with st.container(border=True):
+                c1, c2 = st.columns([1, 5])
+                c1.markdown("<div style='font-size:28px'>✈️</div>", unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"**{f['airline']} — {f['flight_number']}**")
+                    st.write(f"{f['departure_airport']} ({f['departure_time']}) → "
+                             f"{f['arrival_airport']} ({f['arrival_time']})")
+                    st.caption(f"Status: {f['status']}")
+
+        flights_df = pd.DataFrame(st.session_state.last_flights)
+        st.download_button(
+            "⬇️ Export results (.csv)",
+            flights_df.to_csv(index=False),
+            file_name=f"flights_{dep_iata}_{arr_iata}.csv",
+            mime="text/csv",
+        )
+
+# ===================== TAB 4: ITINERARY =====================
+with tab4:
     st.subheader("Generate a Travel Itinerary")
     destination = st.text_input("Destination", placeholder="e.g. Goa")
     days = st.number_input("Number of days", min_value=1, max_value=30, value=3)
@@ -337,17 +435,43 @@ with tab3:
             with st.spinner("Generating itinerary..."):
                 itinerary = generate_itinerary(destination, int(days), interests)
                 save_search("itinerary", f"{destination} - {days} days")
-            st.markdown(itinerary)
-            st.download_button("Download itinerary (.txt)", itinerary, file_name=f"{destination}_itinerary.txt")
+            st.session_state.last_itinerary = itinerary
+            st.session_state.last_itinerary_dest = destination
 
-with tab4:
+    if st.session_state.last_itinerary:
+        itinerary = st.session_state.last_itinerary
+        blocks = itinerary.split("## ")
+        rendered_any = False
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            lines = block.splitlines()
+            heading = lines[0].strip()
+            body = "\n".join(lines[1:]).strip()
+            if heading.lower().startswith("day"):
+                rendered_any = True
+                with st.expander(f"📅 {heading}", expanded=True):
+                    st.markdown(body if body else block)
+        if not rendered_any:
+            # fallback: model didn't use the "## Day N" format, just show it as-is
+            st.markdown(itinerary)
+
+        st.download_button(
+            "⬇️ Download itinerary (.txt)",
+            itinerary,
+            file_name=f"{st.session_state.last_itinerary_dest or 'itinerary'}_itinerary.txt",
+        )
+
+# ===================== TAB 5: SEARCH HISTORY =====================
+with tab5:
     st.subheader("Recent searches")
     history = get_searches()
     if not history:
         st.write("Koi search history nahi hai abhi tak.")
     else:
-        for search_type, details, ts in history:
-            st.write(f"- **[{search_type}]** {details} — {ts}")
+        history_df = pd.DataFrame(history, columns=["Type", "Details", "Timestamp"])
+        st.dataframe(history_df, use_container_width=True, hide_index=True)
     st.caption(
         "Note: Streamlit Cloud pe storage temporary hai — reboot/redeploy hone par history reset ho sakti hai."
     )
