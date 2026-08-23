@@ -4,13 +4,13 @@ An AI-powered travel assistant with a RAG chatbot, live web search, weather look
 
 ## Features
 
-- 💬 **Chat interface** — ask travel questions; the assistant routes to Web Search, Weather, or your uploaded travel document as needed
+- 💬 **Chat interface** — ask travel questions; the assistant routes to Web Search, Weather, or your uploaded travel document as needed. Chat transcript can be exported as `.txt`
 - 📄 **Document upload (RAG)** — upload a travel guide (PDF/TXT) and ask questions about it
-- 🌦️ **Weather lookup** — current weather for any city (OpenWeatherMap)
-- ✈️ **Flight search** — search flights between airports (Aviationstack API)
-- 🗺️ **Itinerary generator** — AI-generated day-by-day itinerary for any destination
+- 🌦️ **Weather lookup** — dedicated tab showing current weather for any city as a result card (OpenWeatherMap)
+- ✈️ **Flight search** — search flights between airports, results shown as cards, exportable as `.csv` (Aviationstack API)
+- 🗺️ **Itinerary generator** — AI-generated day-by-day itinerary, shown as expandable day cards, downloadable as `.txt`
 - 🕘 **Search history** — flight and itinerary searches are logged (SQLite)
-- ✅ **Input validation** — empty/invalid inputs are rejected with a clear message
+- ✅ **Input validation** — empty inputs, too-short/too-long text, and invalid IATA airport codes are rejected with a clear message
 
 ## Tech stack
 
@@ -52,3 +52,8 @@ An AI-powered travel assistant with a RAG chatbot, live web search, weather look
 - Search history (SQLite) resets when the Streamlit Cloud app reboots/redeploys — a hosted database would be needed for persistence.
 - Aviationstack free tier has limited monthly requests and mainly returns real-time/scheduled flight data rather than bookable fares.
 - Web search quality depends on DuckDuckGo's free API, which occasionally returns no results for very broad queries.
+- Document RAG uses `FakeEmbeddings` as a placeholder — retrieval will not be semantically meaningful until this is swapped for a real embedding model (e.g. a HuggingFace sentence-transformer or an embeddings API).
+
+## Demo video
+
+_Add your 5-7 minute demo video link here after recording._
